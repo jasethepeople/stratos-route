@@ -4,6 +4,7 @@ import { z } from "zod";
 import { getSessionCookieOptions } from "./_core/cookies";
 import { systemRouter } from "./_core/systemRouter";
 import * as db from "./db";
+import { createTriggerSecret } from "./gatewaySecurity";
 import { calculateExecution, getProviderMetrics, selectOptimalProvider } from "./routing";
 import { publishInvocation } from "./telemetry";
 import { protectedProcedure, publicProcedure, router } from "./_core/trpc";
@@ -31,6 +32,11 @@ function usageTimeline(records: Awaited<ReturnType<typeof db.listInvocationsForU
   return days;
 }
 
+function startOfMonthMs() {
+  const date = new Date();
+  return Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), 1);
+}
+
 export const appRouter = router({
     // if you need to use socket.io, read and register route in server/_core/index.ts, all api should start with '/api/' so that the gateway can route correctly
   system: systemRouter,
@@ -47,8 +53,26 @@ export const appRouter = router({
   functions: router({
     list: protectedProcedure.query(({ ctx }) => db.listFunctionsForUser(ctx.user.id)),
     deploy: protectedProcedure.input(deploymentInput).mutation(async ({ ctx, input }) => {
-      const functionRecord = await db.createFunction(ctx.user.id, { ...input, triggerId: `fn_${nanoid(14)}` });
+      const existing = await db.getFunctionByNameForUser(ctx.user.id, input.name);
+      const functionRecord = existing
+        ? await db.createFunctionVersion(ctx.user.id, existing.id, input)
+        : await db.createFunction(ctx.user.id, { ...input, triggerId: `fn_${nanoid(14)}`, triggerSecret: createTriggerSecret() });
       if (!functionRecord) throw new Error("Function deployment did not return a record");
+      return functionRecord;
+    }),
+    versions: protectedProcedure.input(z.object({ functionId: z.number().int().positive() })).query(async ({ ctx, input }) => {
+      const versions = await db.listFunctionVersionsForUser(ctx.user.id, input.functionId);
+      if (!versions) throw new Error("Function not found for this tenant");
+      return versions;
+    }),
+    rollback: protectedProcedure.input(z.object({ functionId: z.number().int().positive(), version: z.number().int().positive() })).mutation(async ({ ctx, input }) => {
+      const functionRecord = await db.rollbackFunctionForUser(ctx.user.id, input.functionId, input.version);
+      if (!functionRecord) throw new Error("Rollback target not found for this tenant");
+      return functionRecord;
+    }),
+    rotateTriggerSecret: protectedProcedure.input(z.object({ functionId: z.number().int().positive() })).mutation(async ({ ctx, input }) => {
+      const functionRecord = await db.rotateTriggerSecretForUser(ctx.user.id, input.functionId, createTriggerSecret());
+      if (!functionRecord) throw new Error("Function not found for this tenant");
       return functionRecord;
     }),
   }),
@@ -60,9 +84,9 @@ export const appRouter = router({
       if (!functionRecord) return null;
       return { id: functionRecord.id, name: functionRecord.name, runtime: functionRecord.runtime, triggerId: functionRecord.triggerId };
     }),
-    invoke: publicProcedure.input(z.object({ triggerId: z.string().min(1), payload: z.unknown().optional() })).mutation(async ({ input }) => {
+    invoke: protectedProcedure.input(z.object({ triggerId: z.string().min(1), payload: z.unknown().optional() })).mutation(async ({ ctx, input }) => {
       const functionRecord = await db.getFunctionByTriggerId(input.triggerId);
-      if (!functionRecord) throw new Error("Unknown function trigger");
+      if (!functionRecord || functionRecord.userId !== ctx.user.id) throw new Error("Unknown function trigger for this tenant");
       const timestampMs = Date.now();
       const provider = selectOptimalProvider(timestampMs, functionRecord.id);
       const execution = calculateExecution(input.payload ? 4 : 0, functionRecord.source.length, provider);
@@ -88,7 +112,7 @@ export const appRouter = router({
   }),
   operations: router({
     overview: protectedProcedure.query(async ({ ctx }) => {
-      const [functions, invocations] = await Promise.all([db.listFunctionsForUser(ctx.user.id), db.listInvocationsForUser(ctx.user.id)]);
+      const [functions, invocations, budget, monthlyUsage] = await Promise.all([db.listFunctionsForUser(ctx.user.id), db.listInvocationsForUser(ctx.user.id), db.getOrCreateTenantBudget(ctx.user.id), db.listUsageForUserSince(ctx.user.id, startOfMonthMs())]);
       const totalCostMicros = invocations.reduce((sum, row) => sum + row.costMicros, 0);
       const totalUnits = invocations.reduce((sum, row) => sum + row.billableUnits, 0);
       const averageLatency = invocations.length ? Math.round(invocations.reduce((sum, row) => sum + row.durationMs, 0) / invocations.length) : 0;
@@ -97,9 +121,16 @@ export const appRouter = router({
         invocations,
         providers: getProviderMetrics(Date.now(), ctx.user.id),
         metrics: { totalInvocations: invocations.length, totalUnits, totalCostMicros, averageLatency },
+        budget: {
+          ...budget,
+          monthlySpendMicros: monthlyUsage.reduce((sum, invocation) => sum + invocation.costMicros, 0),
+        },
         timeline: usageTimeline(invocations),
       };
     }),
+  }),
+  budget: router({
+    update: protectedProcedure.input(z.object({ monthlyLimitMicros: z.number().int().min(10_000).max(1_000_000_000), alertThresholdPercent: z.number().int().min(1).max(100) })).mutation(({ ctx, input }) => db.updateTenantBudget(ctx.user.id, input)),
   }),
 });
 

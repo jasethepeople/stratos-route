@@ -18,8 +18,11 @@ import {
   Gauge,
   GitBranch,
   Hexagon,
+  History,
+  KeyRound,
   Play,
   Radio,
+  RotateCcw,
   ShieldCheck,
   TerminalSquare,
   Zap,
@@ -29,7 +32,7 @@ import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YA
 import { toast } from "sonner";
 
 type Runtime = "javascript" | "python";
-type FunctionItem = { id: number; name: string; runtime: Runtime; source: string; triggerId: string };
+type FunctionItem = { id: number; name: string; runtime: Runtime; source: string; triggerId: string; currentVersion?: number; triggerSecret?: string };
 type LogItem = {
   id: string;
   timestampMs: number;
@@ -57,8 +60,8 @@ const codeByRuntime: Record<Runtime, string> = {
 };
 
 const demoFunctions: FunctionItem[] = [
-  { id: -1, name: "telemetry-ingest", runtime: "javascript", source: codeByRuntime.javascript, triggerId: "demo_telemetry" },
-  { id: -2, name: "orbit-health", runtime: "python", source: codeByRuntime.python, triggerId: "demo_orbit" },
+  { id: -1, name: "telemetry-ingest", runtime: "javascript", source: codeByRuntime.javascript, triggerId: "demo_telemetry", currentVersion: 3, triggerSecret: "demo-signing-secret" },
+  { id: -2, name: "orbit-health", runtime: "python", source: codeByRuntime.python, triggerId: "demo_orbit", currentVersion: 2, triggerSecret: "demo-signing-secret" },
 ];
 
 const demoProviders = [
@@ -112,6 +115,8 @@ export default function Home() {
   const [source, setSource] = useState(codeByRuntime.javascript);
   const [activeFunctionId, setActiveFunctionId] = useState<number>(-1);
   const [localLogs, setLocalLogs] = useState<LogItem[]>([]);
+  const [showSecret, setShowSecret] = useState(false);
+  const [budgetDraft, setBudgetDraft] = useState("2.00");
 
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 100);
@@ -160,15 +165,48 @@ export default function Home() {
     onError: error => toast.error("Invocation failed", { description: error.message }),
   });
 
+  const rollbackFunction = trpc.functions.rollback.useMutation({
+    onSuccess: rolledBack => {
+      toast.success(`Restored ${rolledBack.name} to v${rolledBack.currentVersion}`, { description: "The selected snapshot is active." });
+      utils.operations.overview.invalidate();
+      utils.functions.versions.invalidate();
+    },
+    onError: error => toast.error("Rollback failed", { description: error.message }),
+  });
+
+  const rotateSecret = trpc.functions.rotateTriggerSecret.useMutation({
+    onSuccess: rotated => {
+      toast.success("Trigger secret rotated", { description: "Update external callers with the new credential." });
+      setShowSecret(true);
+      setActiveFunctionId(rotated.id);
+      utils.operations.overview.invalidate();
+    },
+    onError: error => toast.error("Secret rotation failed", { description: error.message }),
+  });
+
+  const updateBudget = trpc.budget.update.useMutation({
+    onSuccess: () => {
+      toast.success("Tenant budget updated", { description: "Alert telemetry has been recalibrated." });
+      utils.operations.overview.invalidate();
+    },
+    onError: error => toast.error("Budget update failed", { description: error.message }),
+  });
+
   const tenantFunctions = liveOverview?.functions as FunctionItem[] | undefined;
   const functions = tenantFunctions && tenantFunctions.length > 0 ? tenantFunctions : demoFunctions;
   const activeFunction = functions.find(item => item.id === activeFunctionId) ?? functions[0];
+  const { data: versionHistory } = trpc.functions.versions.useQuery({ functionId: activeFunction?.id ?? 0 }, { enabled: isAuthenticated && (activeFunction?.id ?? 0) > 0 });
   const providers = liveOverview?.providers ?? demoProviders;
   const remoteLogs: LogItem[] = (liveOverview?.invocations ?? []).map(record => ({ ...record, id: `db-${record.id}`, status: record.status as "success" | "error" }));
   const logs = [...localLogs, ...(remoteLogs.length ? remoteLogs : demoLogs)].slice(0, 7);
   const timeline = liveOverview?.timeline?.map(day => ({ ...day, label: day.label.toUpperCase() })) ?? demoTimeline;
   const metrics = liveOverview?.metrics ?? { totalInvocations: 710, totalUnits: 2359, totalCostMicros: 35222, averageLatency: 29 };
+  const budget = liveOverview?.budget ?? { monthlyLimitMicros: 2_000_000, alertThresholdPercent: 80, monthlySpendMicros: 35_222 };
+  const budgetPercent = Math.min(100, Math.round((budget.monthlySpendMicros / Math.max(1, budget.monthlyLimitMicros)) * 100));
+  const budgetAlert = budgetPercent >= budget.alertThresholdPercent;
   const triggerUrl = activeFunction ? `${window.location.origin}/trigger/${activeFunction.triggerId}` : "";
+  const signingSecret = activeFunction?.triggerSecret ?? "Sign in and select a deployed function";
+  const maskedSecret = signingSecret.length > 14 ? `${signingSecret.slice(0, 7)}••••••••${signingSecret.slice(-5)}` : signingSecret;
   const selectedProvider = [...providers].sort((a, b) => a.routeScore - b.routeScore)[0];
   const readiness = loading ? "AUTH SYNC" : isAuthenticated ? "TENANT LINKED" : "SIMULATION MODE";
 
@@ -200,6 +238,28 @@ export default function Home() {
   const copyTrigger = async () => {
     await navigator.clipboard.writeText(triggerUrl);
     toast.success("Trigger URL copied");
+  };
+
+  const copySigningSecret = async () => {
+    await navigator.clipboard.writeText(signingSecret);
+    toast.success("Signing secret copied", { description: "Treat this value as a credential." });
+  };
+
+  const selectFunction = (item: FunctionItem) => {
+    setActiveFunctionId(item.id);
+    setFunctionName(item.name);
+    setRuntime(item.runtime);
+    setSource(item.source);
+    setShowSecret(false);
+  };
+
+  const saveBudget = () => {
+    const monthlyLimitMicros = Math.round(Number(budgetDraft) * 1_000_000);
+    if (!Number.isFinite(monthlyLimitMicros) || monthlyLimitMicros < 10_000) {
+      toast.error("Enter a budget of at least $0.01");
+      return;
+    }
+    updateBudget.mutate({ monthlyLimitMicros, alertThresholdPercent: budget.alertThresholdPercent });
   };
 
   return (
@@ -237,9 +297,10 @@ export default function Home() {
               <aside className="border-b border-[#F5A623]/14 p-3 lg:border-b-0 lg:border-r">
                 <div className="fine-label mb-3">Deployed functions</div>
                 <div className="space-y-1">
-                  {functions.map(item => <button key={item.id} onClick={() => setActiveFunctionId(item.id)} className={`flex w-full items-center justify-between border px-2.5 py-2 text-left transition-colors ${activeFunction?.id === item.id ? "border-[#F5A623]/50 bg-[#F5A623]/[0.07] text-[#F5A623]" : "border-transparent text-[#A8B0BE] hover:border-white/10 hover:bg-white/[0.03]"}`}><span className="truncate">{item.name}</span><ChevronRight className="h-3 w-3 shrink-0" /></button>)}
+                  {functions.map(item => <button key={item.id} onClick={() => selectFunction(item)} className={`flex w-full items-center justify-between border px-2.5 py-2 text-left transition-colors ${activeFunction?.id === item.id ? "border-[#F5A623]/50 bg-[#F5A623]/[0.07] text-[#F5A623]" : "border-transparent text-[#A8B0BE] hover:border-white/10 hover:bg-white/[0.03]"}`}><span className="truncate">{item.name}</span><span className="flex items-center gap-1 text-[8px]"><span>v{item.currentVersion ?? 1}</span><ChevronRight className="h-3 w-3 shrink-0" /></span></button>)}
                 </div>
-                <div className="mt-6 border-t border-white/10 pt-3 text-[9px] leading-relaxed text-[#838B9A]">Each flight path receives a tenant-isolated trigger. Provider credentials are never required in this simulation.</div>
+                <div className="mt-4 border-t border-white/10 pt-3"><div className="mb-2 flex items-center justify-between fine-label"><span>Version log</span><History className="h-3 w-3 text-[#F5A623]" /></div>{isAuthenticated && activeFunction && activeFunction.id > 0 ? <div className="space-y-1">{versionHistory?.slice(0, 4).map(version => <div key={version.id} className="flex items-center justify-between border border-white/[0.08] px-2 py-1.5 text-[9px]"><span className={version.version === activeFunction.currentVersion ? "text-[#F5A623]" : "text-[#AEB5C0]"}>v{version.version}{version.version === activeFunction.currentVersion ? " / LIVE" : ""}</span>{version.version !== activeFunction.currentVersion && <button onClick={() => rollbackFunction.mutate({ functionId: activeFunction.id, version: version.version })} disabled={rollbackFunction.isPending} className="text-[#F5A623] hover:text-[#ffc45b] disabled:opacity-40">ROLLBACK</button>}</div>)}</div> : <div className="text-[9px] leading-relaxed text-[#838B9A]">Authenticate to inspect immutable source snapshots and restore a stable version.</div>}</div>
+                <div className="mt-4 border-t border-white/10 pt-3 text-[9px] leading-relaxed text-[#838B9A]">Each flight path receives a tenant-isolated trigger. Provider credentials are never required in this simulation.</div>
               </aside>
               <div className="min-w-0 p-3">
                 <div className="mb-3 grid gap-3 md:grid-cols-[minmax(0,1fr)_150px]">
@@ -250,7 +311,7 @@ export default function Home() {
                   <div className="flex items-center justify-between border-b border-white/10 bg-white/[0.025] px-3 py-2"><span className="flex items-center gap-2 text-[9px] text-[#838B9A]"><Code2 className="h-3.5 w-3.5 text-[#F5A623]" />/src/handler.{runtime === "javascript" ? "js" : "py"}</span><span className="text-[9px] text-[#F5A623]/70">EDITABLE</span></div>
                   <Textarea value={source} onChange={event => setSource(event.target.value)} spellCheck={false} className="min-h-[236px] resize-y rounded-none border-0 bg-transparent p-3 font-mono text-[11px] leading-6 text-[#DAD5CA] focus-visible:ring-0" />
                 </div>
-                <div className="mt-3 flex flex-wrap items-center justify-between gap-3"><div className="text-[9px] text-[#838B9A]"><span className="text-[#F5A623]">●</span> STATIC ANALYSIS PASS / SOURCE {source.length.toLocaleString()} B</div><Button onClick={handleDeploy} disabled={deployFunction.isPending} className="h-9 bg-[#F5A623] px-4 text-[10px] font-semibold text-[#1C1F26] hover:bg-[#ffc45b] disabled:opacity-60"><Zap className="mr-1.5 h-3.5 w-3.5" />{deployFunction.isPending ? "ARMING..." : "DEPLOY FUNCTION"}</Button></div>
+                <div className="mt-3 flex flex-wrap items-center justify-between gap-3"><div className="text-[9px] text-[#838B9A]"><span className="text-[#F5A623]">●</span> STATIC ANALYSIS PASS / SOURCE {source.length.toLocaleString()} B / {isAuthenticated && activeFunction?.name === functionName ? "NEW VERSION ON DEPLOY" : "NEW FUNCTION"}</div><Button onClick={handleDeploy} disabled={deployFunction.isPending} className="h-9 bg-[#F5A623] px-4 text-[10px] font-semibold text-[#1C1F26] hover:bg-[#ffc45b] disabled:opacity-60"><Zap className="mr-1.5 h-3.5 w-3.5" />{deployFunction.isPending ? "ARMING..." : "DEPLOY FUNCTION"}</Button></div>
               </div>
             </div>
           </div>
@@ -273,6 +334,7 @@ export default function Home() {
                 <Button onClick={handleInvoke} disabled={invokeFunction.isPending} className="h-auto min-h-12 bg-[#F5A623] px-5 text-[10px] font-semibold text-[#1C1F26] hover:bg-[#ffc45b]"><Play className="mr-1.5 h-3.5 w-3.5 fill-current" />{invokeFunction.isPending ? "IN FLIGHT" : "INVOKE HTTP"}</Button>
               </div>
               <div className="grid gap-2 sm:grid-cols-3"><div className="border border-white/[0.08] bg-white/[0.02] p-2.5"><div className="fine-label">Method</div><div className="mt-1 text-[11px] text-[#E8E3D9]">POST / ANY</div></div><div className="border border-white/[0.08] bg-white/[0.02] p-2.5"><div className="fine-label">Selected route</div><div className="mt-1 text-[11px] text-[#F5A623]">{selectedProvider?.name ?? "--"}</div></div><div className="border border-white/[0.08] bg-white/[0.02] p-2.5"><div className="fine-label">Tenant scope</div><div className="mt-1 flex items-center gap-1 text-[11px] text-[#B7D7BB]"><ShieldCheck className="h-3 w-3" />{isAuthenticated ? "AUTHENTICATED" : "PREVIEW"}</div></div></div>
+              <div className="mt-2 border border-[#F5A623]/20 bg-[#F5A623]/[0.035] p-2.5"><div className="flex flex-wrap items-center justify-between gap-2"><div className="fine-label flex items-center gap-1"><KeyRound className="h-3 w-3 text-[#F5A623]" /> Signed trigger / HMAC-SHA256</div><div className="flex items-center gap-2 text-[8px] text-[#B7D7BB]"><ShieldCheck className="h-3 w-3" />60 REQ / MIN</div></div><div className="mt-2 flex items-center gap-2"><span className="min-w-0 flex-1 truncate border border-white/[0.1] bg-black/20 px-2 py-1.5 text-[9px] text-[#F5A623]">{showSecret ? signingSecret : maskedSecret}</span><button onClick={() => setShowSecret(value => !value)} className="border border-[#F5A623]/35 px-2 py-1.5 text-[8px] text-[#F5A623] hover:bg-[#F5A623] hover:text-[#1C1F26]">{showSecret ? "MASK" : "REVEAL"}</button><button onClick={copySigningSecret} className="border border-[#F5A623]/35 px-2 py-1.5 text-[8px] text-[#F5A623] hover:bg-[#F5A623] hover:text-[#1C1F26]">COPY</button>{isAuthenticated && activeFunction && activeFunction.id > 0 && <button onClick={() => rotateSecret.mutate({ functionId: activeFunction.id })} disabled={rotateSecret.isPending} className="border border-[#F5A623]/35 px-2 py-1.5 text-[8px] text-[#F5A623] hover:bg-[#F5A623] hover:text-[#1C1F26]"><RotateCcw className="h-3 w-3" /></button>}</div><div className="mt-1.5 text-[8px] text-[#838B9A]">Send <span className="text-[#F5A623]">x-stratos-timestamp</span> and <span className="text-[#F5A623]">x-stratos-signature</span>; signatures expire after 5 minutes.</div></div>
             </div>
           </div>
 
@@ -294,6 +356,7 @@ export default function Home() {
             <PanelTitle marker="METERING">Tenant metering</PanelTitle>
             <div className="grid grid-cols-2 gap-px bg-white/[0.08]"><div className="bg-[#1C1F26] p-3"><div className="fine-label">Invocations</div><div className="mt-1 text-xl text-[#F4EEE4]">{metrics.totalInvocations.toLocaleString()}</div></div><div className="bg-[#1C1F26] p-3"><div className="fine-label">Billable units</div><div className="mt-1 text-xl text-[#F5A623]">{metrics.totalUnits.toLocaleString()}</div></div><div className="bg-[#1C1F26] p-3"><div className="fine-label">Average latency</div><div className="mt-1 text-xl text-[#F4EEE4]">{metrics.averageLatency} <span className="text-[10px] text-[#838B9A]">ms</span></div></div><div className="bg-[#1C1F26] p-3"><div className="fine-label">Accrued cost</div><div className="mt-1 text-xl text-[#F4EEE4]">{formatCost(metrics.totalCostMicros)}</div></div></div>
             <div className="h-[151px] px-1 pt-3"><ResponsiveContainer width="100%" height="100%"><AreaChart data={timeline} margin={{ top: 8, right: 8, bottom: 0, left: -24 }}><defs><linearGradient id="usageGlow" x1="0" x2="0" y1="0" y2="1"><stop offset="0%" stopColor="#F5A623" stopOpacity={0.38} /><stop offset="100%" stopColor="#F5A623" stopOpacity={0.02} /></linearGradient></defs><CartesianGrid vertical={false} stroke="rgba(255,255,255,0.08)" /><XAxis dataKey="label" tickLine={false} axisLine={false} tick={{ fill: "#838B9A", fontSize: 9, fontFamily: "IBM Plex Mono" }} /><YAxis tickLine={false} axisLine={false} tick={{ fill: "#838B9A", fontSize: 9, fontFamily: "IBM Plex Mono" }} /><Tooltip cursor={{ stroke: "rgba(245,166,35,0.35)" }} contentStyle={{ background: "#1C1F26", border: "1px solid rgba(245,166,35,0.3)", color: "#F4EEE4", fontSize: 10 }} formatter={(value: number) => [`${value} units`, "Billable units"]} /><Area type="monotone" dataKey="units" stroke="#F5A623" strokeWidth={1.5} fill="url(#usageGlow)" /></AreaChart></ResponsiveContainer></div>
+            <div className="mx-3 border-t border-[#F5A623]/15 py-2.5"><div className="mb-1.5 flex items-center justify-between"><span className="fine-label flex items-center gap-1"><CircleDollarSign className="h-3 w-3 text-[#F5A623]" /> Monthly budget</span><span className={budgetAlert ? "text-[9px] text-[#F5A623]" : "text-[9px] text-[#B7D7BB]"}>{budgetPercent}% / {budget.alertThresholdPercent}% alert</span></div><div className="h-1.5 bg-white/[0.07]"><div className={`h-full ${budgetAlert ? "bg-[#F5A623]" : "bg-[#B7D7BB]"}`} style={{ width: `${budgetPercent}%` }} /></div><div className="mt-2 flex gap-2"><Input aria-label="Monthly tenant budget" value={budgetDraft} onChange={event => setBudgetDraft(event.target.value)} className="h-7 border-[#F5A623]/25 bg-black/20 px-2 text-[9px] text-[#F4EEE4]" /><Button onClick={saveBudget} disabled={updateBudget.isPending || !isAuthenticated} className="h-7 bg-[#F5A623] px-2 text-[8px] text-[#1C1F26] hover:bg-[#ffc45b]">SET BUDGET</Button></div><div className="mt-1.5 text-[8px] text-[#838B9A]">{formatCost(budget.monthlySpendMicros)} of {formatCost(budget.monthlyLimitMicros)} used this UTC month.</div></div>
             <div className="flex items-center justify-between px-3 pb-3 text-[8px] tracking-[0.1em] text-[#838B9A]"><span>7-DAY USAGE VECTOR</span><span className="flex items-center gap-1 text-[#F5A623]"><Activity className="h-3 w-3" />RECHARTS / LIVE</span></div>
           </div>
         </section>

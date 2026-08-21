@@ -32,6 +32,8 @@ export const functions = mysqlTable("functions", {
   runtime: mysqlEnum("runtime", ["javascript", "python"]).notNull(),
   source: text("source").notNull(),
   triggerId: varchar("triggerId", { length: 32 }).notNull(),
+  triggerSecret: varchar("triggerSecret", { length: 96 }).notNull(),
+  currentVersion: int("currentVersion").default(1).notNull(),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
 }, table => [
@@ -39,6 +41,26 @@ export const functions = mysqlTable("functions", {
   uniqueIndex("functions_trigger_unique").on(table.triggerId),
   uniqueIndex("functions_user_name_unique").on(table.userId, table.name),
 ]);
+
+export const functionVersions = mysqlTable("function_versions", {
+  id: int("id").autoincrement().primaryKey(),
+  functionId: int("functionId").notNull().references(() => functions.id, { onDelete: "cascade" }),
+  version: int("version").notNull(),
+  runtime: mysqlEnum("runtime", ["javascript", "python"]).notNull(),
+  source: text("source").notNull(),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+}, table => [
+  index("function_versions_function_idx").on(table.functionId),
+  uniqueIndex("function_versions_function_version_unique").on(table.functionId, table.version),
+]);
+
+export const tenantBudgets = mysqlTable("tenant_budgets", {
+  id: int("id").autoincrement().primaryKey(),
+  userId: int("userId").notNull().references(() => users.id, { onDelete: "cascade" }),
+  monthlyLimitMicros: int("monthlyLimitMicros").default(2_000_000).notNull(),
+  alertThresholdPercent: int("alertThresholdPercent").default(80).notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+}, table => [uniqueIndex("tenant_budgets_user_unique").on(table.userId)]);
 
 export const invocationStatus = ["success", "error"] as const;
 
@@ -60,3 +82,5 @@ export const invocations = mysqlTable("invocations", {
 
 export type FunctionRecord = typeof functions.$inferSelect;
 export type InvocationRecord = typeof invocations.$inferSelect;
+export type FunctionVersionRecord = typeof functionVersions.$inferSelect;
+export type TenantBudgetRecord = typeof tenantBudgets.$inferSelect;

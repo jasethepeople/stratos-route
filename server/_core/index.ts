@@ -7,6 +7,7 @@ import { registerOAuthRoutes } from "./oauth";
 import { registerStorageProxy } from "./storageProxy";
 import { appRouter } from "../routers";
 import * as db from "../db";
+import { consumeTriggerQuota, verifyTriggerSignature } from "../gatewaySecurity";
 import { calculateExecution, selectOptimalProvider } from "../routing";
 import { publishInvocation, subscribeToInvocations } from "../telemetry";
 import { createContext } from "./context";
@@ -35,7 +36,7 @@ async function startServer() {
   const app = express();
   const server = createServer(app);
   // Configure body parser with larger size limit for file uploads
-  app.use(express.json({ limit: "50mb" }));
+  app.use(express.json({ limit: "50mb", verify: (req, _res, buffer) => { (req as typeof req & { rawBody?: string }).rawBody = buffer.toString("utf8"); } }));
   app.use(express.urlencoded({ limit: "50mb", extended: true }));
   registerStorageProxy(app);
   registerOAuthRoutes(app);
@@ -68,6 +69,27 @@ async function startServer() {
       const functionRecord = await db.getFunctionByTriggerId(req.params.triggerId);
       if (!functionRecord) {
         res.status(404).json({ error: "Function trigger not found" });
+        return;
+      }
+
+      const rateLimit = consumeTriggerQuota(functionRecord.triggerId);
+      if (!rateLimit.allowed) {
+        res.setHeader("Retry-After", Math.max(1, Math.ceil((rateLimit.resetAt - Date.now()) / 1000)).toString());
+        res.status(429).json({ error: "Trigger rate limit exceeded", limit: 60, resetAt: rateLimit.resetAt });
+        return;
+      }
+
+      const rawBody = (req as typeof req & { rawBody?: string }).rawBody ?? JSON.stringify(req.body ?? {});
+      const signatureIsValid = verifyTriggerSignature({
+        secret: functionRecord.triggerSecret,
+        timestamp: req.get("x-stratos-timestamp") ?? "",
+        signature: req.get("x-stratos-signature") ?? "",
+        method: req.method,
+        path: req.path,
+        rawBody,
+      });
+      if (!signatureIsValid) {
+        res.status(401).json({ error: "Invalid or expired trigger signature" });
         return;
       }
 

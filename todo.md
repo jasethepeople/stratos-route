@@ -14,3 +14,10 @@
 - [x] Enforce authenticated tenant scoping for management procedures and clearly model public trigger URLs as unguessable invocation capabilities.
 - [x] Deliver newly created invocation telemetry to the authenticated dashboard in real time using a server-sent event stream.
 - [x] Re-run typecheck and tests, review the checklist, and save a delivery checkpoint.
+- [x] Add tenant-owned function version history with current-version tracking and rollback.
+- [x] Add a tenant budget threshold, real-time spend calculation, and visible budget alert state.
+- [x] Add opaque per-trigger signing secrets and enforce signed request verification at the HTTP gateway.
+- [x] Add per-trigger in-memory rate limiting and clear HTTP 429 responses.
+- [x] Add version history, budget, and signed-trigger controls to the aerospace dashboard.
+- [x] Add automated tests for rollback, signature verification, and rate limiting.
+- [x] Verify the upgraded dashboard, run typecheck and tests, update the checklist, and save a delivery checkpoint.

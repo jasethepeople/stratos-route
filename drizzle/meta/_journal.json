@@ -15,6 +15,13 @@
       "when": 1787316493933,
       "tag": "0001_puzzling_jazinda",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "5",
+      "when": 1787329081022,
+      "tag": "0002_strong_oracle",
+      "breakpoints": true
     }
   ]
 }
