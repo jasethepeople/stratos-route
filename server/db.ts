@@ -1,6 +1,6 @@
-import { eq } from "drizzle-orm";
+import { desc, eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/mysql2";
-import { InsertUser, users } from "../drizzle/schema";
+import { FunctionRecord, functions, InsertUser, invocations, InvocationRecord, users } from "../drizzle/schema";
 import { ENV } from './_core/env';
 
 let _db: ReturnType<typeof drizzle> | null = null;
@@ -89,4 +89,52 @@ export async function getUserByOpenId(openId: string) {
   return result.length > 0 ? result[0] : undefined;
 }
 
-// TODO: add feature queries here as your schema grows.
+export async function listFunctionsForUser(userId: number) {
+  const db = await getDb();
+  if (!db) throw new Error("Database unavailable");
+  return db.select().from(functions).where(eq(functions.userId, userId)).orderBy(desc(functions.updatedAt));
+}
+
+export async function getFunctionForUser(userId: number, functionId: number) {
+  const db = await getDb();
+  if (!db) throw new Error("Database unavailable");
+  const result = await db.select().from(functions).where(eq(functions.id, functionId)).limit(1);
+  return result.find(item => item.userId === userId);
+}
+
+export async function getFunctionByTriggerId(triggerId: string) {
+  const db = await getDb();
+  if (!db) throw new Error("Database unavailable");
+  const result = await db.select().from(functions).where(eq(functions.triggerId, triggerId)).limit(1);
+  return result[0];
+}
+
+export async function createFunction(userId: number, values: Pick<FunctionRecord, "name" | "runtime" | "source" | "triggerId">) {
+  const db = await getDb();
+  if (!db) throw new Error("Database unavailable");
+  const result = await db.insert(functions).values({ userId, ...values });
+  return getFunctionForUser(userId, Number(result[0].insertId));
+}
+
+export async function createInvocation(record: Omit<InvocationRecord, "id">) {
+  const db = await getDb();
+  if (!db) throw new Error("Database unavailable");
+  const result = await db.insert(invocations).values(record);
+  return { id: Number(result[0].insertId), ...record };
+}
+
+export async function listInvocationsForUser(userId: number, limit = 80) {
+  const db = await getDb();
+  if (!db) throw new Error("Database unavailable");
+  return db.select({
+    id: invocations.id,
+    functionId: invocations.functionId,
+    functionName: functions.name,
+    provider: invocations.provider,
+    status: invocations.status,
+    durationMs: invocations.durationMs,
+    billableUnits: invocations.billableUnits,
+    costMicros: invocations.costMicros,
+    timestampMs: invocations.timestampMs,
+  }).from(invocations).innerJoin(functions, eq(invocations.functionId, functions.id)).where(eq(invocations.userId, userId)).orderBy(desc(invocations.timestampMs)).limit(limit);
+}

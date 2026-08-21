@@ -6,6 +6,9 @@ import { createExpressMiddleware } from "@trpc/server/adapters/express";
 import { registerOAuthRoutes } from "./oauth";
 import { registerStorageProxy } from "./storageProxy";
 import { appRouter } from "../routers";
+import * as db from "../db";
+import { calculateExecution, selectOptimalProvider } from "../routing";
+import { publishInvocation, subscribeToInvocations } from "../telemetry";
 import { createContext } from "./context";
 import { serveStatic, setupVite } from "./vite";
 
@@ -36,6 +39,75 @@ async function startServer() {
   app.use(express.urlencoded({ limit: "50mb", extended: true }));
   registerStorageProxy(app);
   registerOAuthRoutes(app);
+  app.get("/api/telemetry/stream", async (req, res) => {
+    const context = await createContext({ req, res, info: {} as never });
+    if (!context.user) {
+      res.status(401).json({ error: "Authentication required for tenant telemetry" });
+      return;
+    }
+
+    res.status(200);
+    res.setHeader("Content-Type", "text/event-stream");
+    res.setHeader("Cache-Control", "no-cache, no-transform");
+    res.setHeader("Connection", "keep-alive");
+    res.flushHeaders();
+    res.write(`event: ready\ndata: ${JSON.stringify({ tenantId: context.user.id, timestampMs: Date.now() })}\n\n`);
+
+    const unsubscribe = subscribeToInvocations(context.user.id, telemetry => {
+      res.write(`event: invocation\ndata: ${JSON.stringify(telemetry)}\n\n`);
+    });
+    const keepAlive = setInterval(() => res.write(": ping\n\n"), 25_000);
+    req.on("close", () => {
+      clearInterval(keepAlive);
+      unsubscribe();
+      res.end();
+    });
+  });
+  app.all("/trigger/:triggerId", async (req, res) => {
+    try {
+      const functionRecord = await db.getFunctionByTriggerId(req.params.triggerId);
+      if (!functionRecord) {
+        res.status(404).json({ error: "Function trigger not found" });
+        return;
+      }
+
+      const timestampMs = Date.now();
+      const provider = selectOptimalProvider(timestampMs, functionRecord.id);
+      const execution = calculateExecution(req.body ? 4 : 0, functionRecord.source.length, provider);
+      const invocation = await db.createInvocation({
+        userId: functionRecord.userId,
+        functionId: functionRecord.id,
+        provider: provider.id,
+        status: "success",
+        ...execution,
+        timestampMs,
+      });
+      publishInvocation(functionRecord.userId, {
+        id: invocation.id,
+        timestampMs,
+        functionName: functionRecord.name,
+        provider: provider.name,
+        durationMs: invocation.durationMs,
+        status: invocation.status,
+        billableUnits: invocation.billableUnits,
+      });
+
+      res.setHeader("x-stratos-provider", provider.name);
+      res.setHeader("x-stratos-duration-ms", execution.durationMs.toString());
+      res.status(200).json({
+        ok: true,
+        function: functionRecord.name,
+        runtime: functionRecord.runtime,
+        provider: provider.name,
+        executionMs: execution.durationMs,
+        timestamp: new Date(timestampMs).toISOString(),
+        received: req.body ?? null,
+      });
+    } catch (error) {
+      console.error("[Gateway] Trigger invocation failed", error);
+      res.status(500).json({ error: "Gateway invocation failed" });
+    }
+  });
   // tRPC API
   app.use(
     "/api/trpc",

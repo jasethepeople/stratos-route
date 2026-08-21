@@ -1,4 +1,103 @@
 @import "tailwindcss";
+@plugin "tailwindcss-animate";
+
+:root,
+.dark {
+  --background: 220 15% 13%;
+  --foreground: 36 30% 92%;
+  --card: 218 14% 16%;
+  --card-foreground: 36 30% 92%;
+  --popover: 218 14% 16%;
+  --popover-foreground: 36 30% 92%;
+  --primary: 38 90% 55%;
+  --primary-foreground: 220 15% 13%;
+  --secondary: 218 12% 22%;
+  --secondary-foreground: 36 30% 92%;
+  --muted: 218 12% 20%;
+  --muted-foreground: 215 12% 61%;
+  --accent: 38 90% 55%;
+  --accent-foreground: 220 15% 13%;
+  --destructive: 2 72% 55%;
+  --destructive-foreground: 0 0% 100%;
+  --border: 217 12% 28%;
+  --input: 217 12% 28%;
+  --ring: 38 90% 55%;
+  --radius: 0.3rem;
+}
+
+* { border-color: hsl(var(--border)); }
+
+html { background: #1C1F26; }
+
+body {
+  min-width: 320px;
+  margin: 0;
+  background: #1C1F26;
+  color: #F4EEE4;
+  font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 12px;
+}
+
+button, input, textarea, select { font: inherit; }
+
+::selection { background: #F5A623; color: #1C1F26; }
+
+.command-surface {
+  min-height: 100vh;
+  background-color: #1C1F26;
+  background-image:
+    linear-gradient(rgba(245, 166, 35, 0.028) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(245, 166, 35, 0.028) 1px, transparent 1px),
+    radial-gradient(circle at 80% 0%, rgba(245, 166, 35, 0.08), transparent 34rem);
+  background-size: 28px 28px, 28px 28px, auto;
+}
+
+.panel {
+  background: rgba(28, 31, 38, 0.94);
+  border: 1px solid rgba(245, 166, 35, 0.16);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.025), 0 18px 50px rgba(0, 0, 0, 0.12);
+}
+
+.panel-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid rgba(245, 166, 35, 0.14);
+  padding: 0.7rem 0.9rem;
+  color: #C9CED8;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.status-dot { box-shadow: 0 0 0 3px rgba(245, 166, 35, 0.12), 0 0 12px rgba(245, 166, 35, 0.8); }
+
+.fine-label { color: #838B9A; font-size: 9px; letter-spacing: 0.14em; text-transform: uppercase; }
+
+.amber-glow { text-shadow: 0 0 14px rgba(245, 166, 35, 0.28); }
+
+.scanline { position: relative; overflow: hidden; }
+.scanline::after {
+  content: "";
+  pointer-events: none;
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(to bottom, transparent 0%, rgba(245, 166, 35, 0.035) 50%, transparent 100%);
+  background-size: 100% 6px;
+  mix-blend-mode: screen;
+  opacity: 0.35;
+}
+
+.metric-spark { background: linear-gradient(90deg, #F5A623 var(--meter), rgba(245, 166, 35, 0.1) var(--meter)); }
+
+@media (prefers-reduced-motion: no-preference) {
+  .live-pulse { animation: livePulse 1.8s ease-in-out infinite; }
+  .panel { transition: border-color 180ms cubic-bezier(0.23, 1, 0.32, 1), transform 180ms cubic-bezier(0.23, 1, 0.32, 1); }
+  .panel:hover { border-color: rgba(245, 166, 35, 0.28); }
+}
+
+@keyframes livePulse { 50% { opacity: 0.35; } }
 @import "tw-animate-css";
 
 @custom-variant dark (&:is(.dark *));
