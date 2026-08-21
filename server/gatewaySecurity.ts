@@ -23,14 +23,14 @@ export function verifyTriggerSignature(options: { secret: string; timestamp: str
   return supplied.length === expectedBuffer.length && timingSafeEqual(supplied, expectedBuffer);
 }
 
-export function consumeTriggerQuota(triggerId: string, now = Date.now()) {
+export function consumeTriggerQuota(triggerId: string, now = Date.now(), limit = RATE_LIMIT) {
   const current = buckets.get(triggerId);
   const bucket = !current || current.resetAt <= now ? { count: 0, resetAt: now + RATE_WINDOW_MS } : current;
   bucket.count += 1;
   buckets.set(triggerId, bucket);
   return {
-    allowed: bucket.count <= RATE_LIMIT,
-    remaining: Math.max(0, RATE_LIMIT - bucket.count),
+    allowed: bucket.count <= limit,
+    remaining: Math.max(0, limit - bucket.count),
     resetAt: bucket.resetAt,
   };
 }

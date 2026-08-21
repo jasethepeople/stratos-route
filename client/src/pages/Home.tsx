@@ -4,6 +4,7 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { startLogin } from "@/const";
 import { trpc } from "@/lib/trpc";
+import { buildSignedRequestSnippet, type SnippetLanguage } from "@/lib/requestSnippets";
 import {
   Activity,
   Box,
@@ -32,7 +33,7 @@ import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YA
 import { toast } from "sonner";
 
 type Runtime = "javascript" | "python";
-type FunctionItem = { id: number; name: string; runtime: Runtime; source: string; triggerId: string; currentVersion?: number; triggerSecret?: string };
+type FunctionItem = { id: number; name: string; runtime: Runtime; source: string; triggerId: string; currentVersion?: number; triggerSecret?: string; rateLimitPerMinute?: number };
 type LogItem = {
   id: string;
   timestampMs: number;
@@ -60,8 +61,8 @@ const codeByRuntime: Record<Runtime, string> = {
 };
 
 const demoFunctions: FunctionItem[] = [
-  { id: -1, name: "telemetry-ingest", runtime: "javascript", source: codeByRuntime.javascript, triggerId: "demo_telemetry", currentVersion: 3, triggerSecret: "demo-signing-secret" },
-  { id: -2, name: "orbit-health", runtime: "python", source: codeByRuntime.python, triggerId: "demo_orbit", currentVersion: 2, triggerSecret: "demo-signing-secret" },
+  { id: -1, name: "telemetry-ingest", runtime: "javascript", source: codeByRuntime.javascript, triggerId: "demo_telemetry", currentVersion: 3, triggerSecret: "demo-signing-secret", rateLimitPerMinute: 60 },
+  { id: -2, name: "orbit-health", runtime: "python", source: codeByRuntime.python, triggerId: "demo_orbit", currentVersion: 2, triggerSecret: "demo-signing-secret", rateLimitPerMinute: 120 },
 ];
 
 const demoProviders = [
@@ -117,6 +118,9 @@ export default function Home() {
   const [localLogs, setLocalLogs] = useState<LogItem[]>([]);
   const [showSecret, setShowSecret] = useState(false);
   const [budgetDraft, setBudgetDraft] = useState("2.00");
+  const [webhookDraft, setWebhookDraft] = useState("");
+  const [rateLimitDraft, setRateLimitDraft] = useState("60");
+  const [snippetLanguage, setSnippetLanguage] = useState<SnippetLanguage>("javascript");
 
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 100);
@@ -192,6 +196,15 @@ export default function Home() {
     onError: error => toast.error("Budget update failed", { description: error.message }),
   });
 
+  const updateRateLimit = trpc.functions.updateRateLimit.useMutation({
+    onSuccess: updated => {
+      toast.success(`Rate policy updated to ${updated.rateLimitPerMinute} rpm`);
+      utils.operations.overview.invalidate();
+      setActiveFunctionId(updated.id);
+    },
+    onError: error => toast.error("Rate policy update failed", { description: error.message }),
+  });
+
   const tenantFunctions = liveOverview?.functions as FunctionItem[] | undefined;
   const functions = tenantFunctions && tenantFunctions.length > 0 ? tenantFunctions : demoFunctions;
   const activeFunction = functions.find(item => item.id === activeFunctionId) ?? functions[0];
@@ -201,7 +214,7 @@ export default function Home() {
   const logs = [...localLogs, ...(remoteLogs.length ? remoteLogs : demoLogs)].slice(0, 7);
   const timeline = liveOverview?.timeline?.map(day => ({ ...day, label: day.label.toUpperCase() })) ?? demoTimeline;
   const metrics = liveOverview?.metrics ?? { totalInvocations: 710, totalUnits: 2359, totalCostMicros: 35222, averageLatency: 29 };
-  const budget = liveOverview?.budget ?? { monthlyLimitMicros: 2_000_000, alertThresholdPercent: 80, monthlySpendMicros: 35_222 };
+  const budget = liveOverview?.budget ?? { monthlyLimitMicros: 2_000_000, alertThresholdPercent: 80, monthlySpendMicros: 35_222, webhookUrl: null, lastAlertStatus: null };
   const budgetPercent = Math.min(100, Math.round((budget.monthlySpendMicros / Math.max(1, budget.monthlyLimitMicros)) * 100));
   const budgetAlert = budgetPercent >= budget.alertThresholdPercent;
   const triggerUrl = activeFunction ? `${window.location.origin}/trigger/${activeFunction.triggerId}` : "";
@@ -209,6 +222,10 @@ export default function Home() {
   const maskedSecret = signingSecret.length > 14 ? `${signingSecret.slice(0, 7)}••••••••${signingSecret.slice(-5)}` : signingSecret;
   const selectedProvider = [...providers].sort((a, b) => a.routeScore - b.routeScore)[0];
   const readiness = loading ? "AUTH SYNC" : isAuthenticated ? "TENANT LINKED" : "SIMULATION MODE";
+
+  useEffect(() => {
+    if (liveOverview?.budget?.webhookUrl !== undefined) setWebhookDraft(liveOverview.budget.webhookUrl ?? "");
+  }, [liveOverview?.budget?.webhookUrl]);
 
   const handleRuntimeChange = (next: Runtime) => {
     setRuntime(next);
@@ -251,6 +268,7 @@ export default function Home() {
     setRuntime(item.runtime);
     setSource(item.source);
     setShowSecret(false);
+    setRateLimitDraft(String(item.rateLimitPerMinute ?? 60));
   };
 
   const saveBudget = () => {
@@ -259,7 +277,23 @@ export default function Home() {
       toast.error("Enter a budget of at least $0.01");
       return;
     }
-    updateBudget.mutate({ monthlyLimitMicros, alertThresholdPercent: budget.alertThresholdPercent });
+    updateBudget.mutate({ monthlyLimitMicros, alertThresholdPercent: budget.alertThresholdPercent, webhookUrl: webhookDraft.trim() });
+  };
+
+  const saveRatePolicy = () => {
+    const rateLimitPerMinute = Number(rateLimitDraft);
+    if (!activeFunction || activeFunction.id <= 0 || !Number.isInteger(rateLimitPerMinute) || rateLimitPerMinute < 1) {
+      toast.error("Set an integer policy of at least 1 request per minute");
+      return;
+    }
+    updateRateLimit.mutate({ functionId: activeFunction.id, rateLimitPerMinute });
+  };
+
+  const requestSnippet = buildSignedRequestSnippet({ language: snippetLanguage, triggerUrl, triggerId: activeFunction?.triggerId ?? "fn_example", signingSecret });
+
+  const copyRequestSnippet = async () => {
+    await navigator.clipboard.writeText(requestSnippet);
+    toast.success(`${snippetLanguage === "javascript" ? "JavaScript" : "Python"} request snippet copied`);
   };
 
   return (
@@ -334,7 +368,7 @@ export default function Home() {
                 <Button onClick={handleInvoke} disabled={invokeFunction.isPending} className="h-auto min-h-12 bg-[#F5A623] px-5 text-[10px] font-semibold text-[#1C1F26] hover:bg-[#ffc45b]"><Play className="mr-1.5 h-3.5 w-3.5 fill-current" />{invokeFunction.isPending ? "IN FLIGHT" : "INVOKE HTTP"}</Button>
               </div>
               <div className="grid gap-2 sm:grid-cols-3"><div className="border border-white/[0.08] bg-white/[0.02] p-2.5"><div className="fine-label">Method</div><div className="mt-1 text-[11px] text-[#E8E3D9]">POST / ANY</div></div><div className="border border-white/[0.08] bg-white/[0.02] p-2.5"><div className="fine-label">Selected route</div><div className="mt-1 text-[11px] text-[#F5A623]">{selectedProvider?.name ?? "--"}</div></div><div className="border border-white/[0.08] bg-white/[0.02] p-2.5"><div className="fine-label">Tenant scope</div><div className="mt-1 flex items-center gap-1 text-[11px] text-[#B7D7BB]"><ShieldCheck className="h-3 w-3" />{isAuthenticated ? "AUTHENTICATED" : "PREVIEW"}</div></div></div>
-              <div className="mt-2 border border-[#F5A623]/20 bg-[#F5A623]/[0.035] p-2.5"><div className="flex flex-wrap items-center justify-between gap-2"><div className="fine-label flex items-center gap-1"><KeyRound className="h-3 w-3 text-[#F5A623]" /> Signed trigger / HMAC-SHA256</div><div className="flex items-center gap-2 text-[8px] text-[#B7D7BB]"><ShieldCheck className="h-3 w-3" />60 REQ / MIN</div></div><div className="mt-2 flex items-center gap-2"><span className="min-w-0 flex-1 truncate border border-white/[0.1] bg-black/20 px-2 py-1.5 text-[9px] text-[#F5A623]">{showSecret ? signingSecret : maskedSecret}</span><button onClick={() => setShowSecret(value => !value)} className="border border-[#F5A623]/35 px-2 py-1.5 text-[8px] text-[#F5A623] hover:bg-[#F5A623] hover:text-[#1C1F26]">{showSecret ? "MASK" : "REVEAL"}</button><button onClick={copySigningSecret} className="border border-[#F5A623]/35 px-2 py-1.5 text-[8px] text-[#F5A623] hover:bg-[#F5A623] hover:text-[#1C1F26]">COPY</button>{isAuthenticated && activeFunction && activeFunction.id > 0 && <button onClick={() => rotateSecret.mutate({ functionId: activeFunction.id })} disabled={rotateSecret.isPending} className="border border-[#F5A623]/35 px-2 py-1.5 text-[8px] text-[#F5A623] hover:bg-[#F5A623] hover:text-[#1C1F26]"><RotateCcw className="h-3 w-3" /></button>}</div><div className="mt-1.5 text-[8px] text-[#838B9A]">Send <span className="text-[#F5A623]">x-stratos-timestamp</span> and <span className="text-[#F5A623]">x-stratos-signature</span>; signatures expire after 5 minutes.</div></div>
+              <div className="mt-2 border border-[#F5A623]/20 bg-[#F5A623]/[0.035] p-2.5"><div className="flex flex-wrap items-center justify-between gap-2"><div className="fine-label flex items-center gap-1"><KeyRound className="h-3 w-3 text-[#F5A623]" /> Signed trigger / HMAC-SHA256</div><div className="flex items-center gap-2 text-[8px] text-[#B7D7BB]"><ShieldCheck className="h-3 w-3" />{activeFunction?.rateLimitPerMinute ?? 60} REQ / MIN</div></div><div className="mt-2 flex items-center gap-2"><span className="min-w-0 flex-1 truncate border border-white/[0.1] bg-black/20 px-2 py-1.5 text-[9px] text-[#F5A623]">{showSecret ? signingSecret : maskedSecret}</span><button onClick={() => setShowSecret(value => !value)} className="border border-[#F5A623]/35 px-2 py-1.5 text-[8px] text-[#F5A623] hover:bg-[#F5A623] hover:text-[#1C1F26]">{showSecret ? "MASK" : "REVEAL"}</button><button onClick={copySigningSecret} className="border border-[#F5A623]/35 px-2 py-1.5 text-[8px] text-[#F5A623] hover:bg-[#F5A623] hover:text-[#1C1F26]">COPY</button>{isAuthenticated && activeFunction && activeFunction.id > 0 && <button onClick={() => rotateSecret.mutate({ functionId: activeFunction.id })} disabled={rotateSecret.isPending} className="border border-[#F5A623]/35 px-2 py-1.5 text-[8px] text-[#F5A623] hover:bg-[#F5A623] hover:text-[#1C1F26]"><RotateCcw className="h-3 w-3" /></button>}</div><div className="mt-2 grid gap-2 border-t border-[#F5A623]/15 pt-2 sm:grid-cols-[1fr_auto]"><div><div className="fine-label mb-1">Function rate policy</div><Input aria-label="Function requests per minute" value={rateLimitDraft} onChange={event => setRateLimitDraft(event.target.value)} className="h-7 border-[#F5A623]/25 bg-black/20 px-2 text-[9px] text-[#F4EEE4]" /></div><Button onClick={saveRatePolicy} disabled={updateRateLimit.isPending || !isAuthenticated || !activeFunction || activeFunction.id <= 0} className="h-7 self-end bg-[#F5A623] px-2 text-[8px] text-[#1C1F26] hover:bg-[#ffc45b]">SET RPM</Button></div><div className="mt-1.5 text-[8px] text-[#838B9A]">Send <span className="text-[#F5A623]">x-stratos-timestamp</span> and <span className="text-[#F5A623]">x-stratos-signature</span>; signatures expire after 5 minutes.</div></div>
             </div>
           </div>
 
@@ -342,6 +376,14 @@ export default function Home() {
             <PanelTitle marker="ROUTER">Flight computer</PanelTitle>
             <div className="grid grid-cols-3 divide-x divide-white/[0.08] p-3"><div className="px-2 first:pl-0"><div className="fine-label">Candidates</div><div className="mt-1 text-lg text-[#F4EEE4]">03</div></div><div className="px-2"><div className="fine-label">Lead score</div><div className="mt-1 text-lg text-[#F5A623]">{selectedProvider?.routeScore.toFixed(1) ?? "--"}</div></div><div className="px-2 pr-0"><div className="fine-label">Decision</div><div className="mt-1 text-lg text-[#B7D7BB]">LIVE</div></div></div>
             <div className="border-t border-white/[0.08] px-3 py-2 text-[9px] leading-relaxed text-[#838B9A]">All invocations are evaluated independently against live simulated provider telemetry. The provider with the lowest combined score clears the gate.</div>
+          </div>
+        </section>
+
+        <section className="panel mt-4 min-w-0">
+          <PanelTitle marker="CLIENT">Signed request generator</PanelTitle>
+          <div className="grid gap-0 lg:grid-cols-[220px_minmax(0,1fr)]">
+            <div className="border-b border-[#F5A623]/14 p-3 lg:border-b-0 lg:border-r"><div className="fine-label mb-3">Flight client</div><div className="space-y-1"><button onClick={() => setSnippetLanguage("javascript")} className={`w-full border px-2.5 py-2 text-left text-[10px] ${snippetLanguage === "javascript" ? "border-[#F5A623]/45 bg-[#F5A623]/[0.07] text-[#F5A623]" : "border-transparent text-[#AEB5C0] hover:border-white/10"}`}>JAVASCRIPT / NODE</button><button onClick={() => setSnippetLanguage("python")} className={`w-full border px-2.5 py-2 text-left text-[10px] ${snippetLanguage === "python" ? "border-[#F5A623]/45 bg-[#F5A623]/[0.07] text-[#F5A623]" : "border-transparent text-[#AEB5C0] hover:border-white/10"}`}>PYTHON / REQUESTS</button></div><div className="mt-5 border-t border-white/10 pt-3 text-[9px] leading-relaxed text-[#838B9A]">A timestamped HMAC signature covers the method, trigger path, and raw request body. Paste this snippet into a trusted server environment.</div></div>
+            <div className="p-3"><div className="mb-2 flex items-center justify-between"><div className="fine-label">{snippetLanguage === "javascript" ? "JavaScript" : "Python"} / POST invocation</div><Button onClick={copyRequestSnippet} className="h-7 bg-[#F5A623] px-2 text-[8px] text-[#1C1F26] hover:bg-[#ffc45b]"><Copy className="mr-1 h-3 w-3" />COPY SNIPPET</Button></div><pre className="scanline max-h-[310px] overflow-auto border border-[#F5A623]/22 bg-[#101217] p-3 text-[10px] leading-5 text-[#DAD5CA]"><code>{requestSnippet}</code></pre></div>
           </div>
         </section>
 
@@ -356,7 +398,7 @@ export default function Home() {
             <PanelTitle marker="METERING">Tenant metering</PanelTitle>
             <div className="grid grid-cols-2 gap-px bg-white/[0.08]"><div className="bg-[#1C1F26] p-3"><div className="fine-label">Invocations</div><div className="mt-1 text-xl text-[#F4EEE4]">{metrics.totalInvocations.toLocaleString()}</div></div><div className="bg-[#1C1F26] p-3"><div className="fine-label">Billable units</div><div className="mt-1 text-xl text-[#F5A623]">{metrics.totalUnits.toLocaleString()}</div></div><div className="bg-[#1C1F26] p-3"><div className="fine-label">Average latency</div><div className="mt-1 text-xl text-[#F4EEE4]">{metrics.averageLatency} <span className="text-[10px] text-[#838B9A]">ms</span></div></div><div className="bg-[#1C1F26] p-3"><div className="fine-label">Accrued cost</div><div className="mt-1 text-xl text-[#F4EEE4]">{formatCost(metrics.totalCostMicros)}</div></div></div>
             <div className="h-[151px] px-1 pt-3"><ResponsiveContainer width="100%" height="100%"><AreaChart data={timeline} margin={{ top: 8, right: 8, bottom: 0, left: -24 }}><defs><linearGradient id="usageGlow" x1="0" x2="0" y1="0" y2="1"><stop offset="0%" stopColor="#F5A623" stopOpacity={0.38} /><stop offset="100%" stopColor="#F5A623" stopOpacity={0.02} /></linearGradient></defs><CartesianGrid vertical={false} stroke="rgba(255,255,255,0.08)" /><XAxis dataKey="label" tickLine={false} axisLine={false} tick={{ fill: "#838B9A", fontSize: 9, fontFamily: "IBM Plex Mono" }} /><YAxis tickLine={false} axisLine={false} tick={{ fill: "#838B9A", fontSize: 9, fontFamily: "IBM Plex Mono" }} /><Tooltip cursor={{ stroke: "rgba(245,166,35,0.35)" }} contentStyle={{ background: "#1C1F26", border: "1px solid rgba(245,166,35,0.3)", color: "#F4EEE4", fontSize: 10 }} formatter={(value: number) => [`${value} units`, "Billable units"]} /><Area type="monotone" dataKey="units" stroke="#F5A623" strokeWidth={1.5} fill="url(#usageGlow)" /></AreaChart></ResponsiveContainer></div>
-            <div className="mx-3 border-t border-[#F5A623]/15 py-2.5"><div className="mb-1.5 flex items-center justify-between"><span className="fine-label flex items-center gap-1"><CircleDollarSign className="h-3 w-3 text-[#F5A623]" /> Monthly budget</span><span className={budgetAlert ? "text-[9px] text-[#F5A623]" : "text-[9px] text-[#B7D7BB]"}>{budgetPercent}% / {budget.alertThresholdPercent}% alert</span></div><div className="h-1.5 bg-white/[0.07]"><div className={`h-full ${budgetAlert ? "bg-[#F5A623]" : "bg-[#B7D7BB]"}`} style={{ width: `${budgetPercent}%` }} /></div><div className="mt-2 flex gap-2"><Input aria-label="Monthly tenant budget" value={budgetDraft} onChange={event => setBudgetDraft(event.target.value)} className="h-7 border-[#F5A623]/25 bg-black/20 px-2 text-[9px] text-[#F4EEE4]" /><Button onClick={saveBudget} disabled={updateBudget.isPending || !isAuthenticated} className="h-7 bg-[#F5A623] px-2 text-[8px] text-[#1C1F26] hover:bg-[#ffc45b]">SET BUDGET</Button></div><div className="mt-1.5 text-[8px] text-[#838B9A]">{formatCost(budget.monthlySpendMicros)} of {formatCost(budget.monthlyLimitMicros)} used this UTC month.</div></div>
+            <div className="mx-3 border-t border-[#F5A623]/15 py-2.5"><div className="mb-1.5 flex items-center justify-between"><span className="fine-label flex items-center gap-1"><CircleDollarSign className="h-3 w-3 text-[#F5A623]" /> Monthly budget</span><span className={budgetAlert ? "text-[9px] text-[#F5A623]" : "text-[9px] text-[#B7D7BB]"}>{budgetPercent}% / {budget.alertThresholdPercent}% alert</span></div><div className="h-1.5 bg-white/[0.07]"><div className={`h-full ${budgetAlert ? "bg-[#F5A623]" : "bg-[#B7D7BB]"}`} style={{ width: `${budgetPercent}%` }} /></div><div className="mt-2 flex gap-2"><Input aria-label="Monthly tenant budget" value={budgetDraft} onChange={event => setBudgetDraft(event.target.value)} className="h-7 border-[#F5A623]/25 bg-black/20 px-2 text-[9px] text-[#F4EEE4]" /><Button onClick={saveBudget} disabled={updateBudget.isPending || !isAuthenticated} className="h-7 bg-[#F5A623] px-2 text-[8px] text-[#1C1F26] hover:bg-[#ffc45b]">SET BUDGET</Button></div><div className="mt-2"><div className="fine-label mb-1">Alert webhook / HTTPS</div><Input aria-label="Budget alert webhook" value={webhookDraft} onChange={event => setWebhookDraft(event.target.value)} placeholder="https://alerts.example.com/stratos" className="h-7 border-[#F5A623]/25 bg-black/20 px-2 text-[9px] text-[#F4EEE4] placeholder:text-[#606978]" /></div><div className="mt-1.5 text-[8px] text-[#838B9A]">{formatCost(budget.monthlySpendMicros)} of {formatCost(budget.monthlyLimitMicros)} used this UTC month. {budget.lastAlertStatus ? `Latest delivery: ${budget.lastAlertStatus}.` : "Alert sends once when the threshold is crossed each UTC month."}</div></div>
             <div className="flex items-center justify-between px-3 pb-3 text-[8px] tracking-[0.1em] text-[#838B9A]"><span>7-DAY USAGE VECTOR</span><span className="flex items-center gap-1 text-[#F5A623]"><Activity className="h-3 w-3" />RECHARTS / LIVE</span></div>
           </div>
         </section>

@@ -165,6 +165,15 @@ export async function rotateTriggerSecretForUser(userId: number, functionId: num
   return getFunctionForUser(userId, functionId);
 }
 
+export async function updateFunctionRateLimitForUser(userId: number, functionId: number, rateLimitPerMinute: number) {
+  const db = await getDb();
+  if (!db) throw new Error("Database unavailable");
+  const functionRecord = await getFunctionForUser(userId, functionId);
+  if (!functionRecord) return undefined;
+  await db.update(functions).set({ rateLimitPerMinute }).where(eq(functions.id, functionId));
+  return getFunctionForUser(userId, functionId);
+}
+
 export async function createInvocation(record: Omit<InvocationRecord, "id">) {
   const db = await getDb();
   if (!db) throw new Error("Database unavailable");
@@ -196,12 +205,19 @@ export async function getOrCreateTenantBudget(userId: number) {
   return result[0]!;
 }
 
-export async function updateTenantBudget(userId: number, values: Pick<TenantBudgetRecord, "monthlyLimitMicros" | "alertThresholdPercent">) {
+export async function updateTenantBudget(userId: number, values: Pick<TenantBudgetRecord, "monthlyLimitMicros" | "alertThresholdPercent" | "webhookUrl">) {
   const db = await getDb();
   if (!db) throw new Error("Database unavailable");
   await getOrCreateTenantBudget(userId);
   await db.update(tenantBudgets).set(values).where(eq(tenantBudgets.userId, userId));
   return getOrCreateTenantBudget(userId);
+}
+
+export async function markTenantBudgetAlert(userId: number, period: string, status: string) {
+  const db = await getDb();
+  if (!db) throw new Error("Database unavailable");
+  await getOrCreateTenantBudget(userId);
+  await db.update(tenantBudgets).set({ lastAlertPeriod: period, lastAlertStatus: status }).where(eq(tenantBudgets.userId, userId));
 }
 
 export async function listUsageForUserSince(userId: number, timestampMs: number) {

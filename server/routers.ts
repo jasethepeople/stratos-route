@@ -4,6 +4,7 @@ import { z } from "zod";
 import { getSessionCookieOptions } from "./_core/cookies";
 import { systemRouter } from "./_core/systemRouter";
 import * as db from "./db";
+import { buildBudgetAlertPreview, maybeDispatchBudgetAlert, normalizeWebhookUrl } from "./budgetAlerts";
 import { createTriggerSecret } from "./gatewaySecurity";
 import { calculateExecution, getProviderMetrics, selectOptimalProvider } from "./routing";
 import { publishInvocation } from "./telemetry";
@@ -75,6 +76,11 @@ export const appRouter = router({
       if (!functionRecord) throw new Error("Function not found for this tenant");
       return functionRecord;
     }),
+    updateRateLimit: protectedProcedure.input(z.object({ functionId: z.number().int().positive(), rateLimitPerMinute: z.number().int().min(1).max(10_000) })).mutation(async ({ ctx, input }) => {
+      const functionRecord = await db.updateFunctionRateLimitForUser(ctx.user.id, input.functionId, input.rateLimitPerMinute);
+      if (!functionRecord) throw new Error("Function not found for this tenant");
+      return functionRecord;
+    }),
   }),
   gateway: router({
     // A raw trigger ID is deliberately a capability URL for invocation. Tenant-scoped
@@ -107,6 +113,7 @@ export const appRouter = router({
         status: invocation.status,
         billableUnits: invocation.billableUnits,
       });
+      await maybeDispatchBudgetAlert(functionRecord.userId);
       return { invocation, provider, functionName: functionRecord.name, response: { ok: true, provider: provider.name, runtime: functionRecord.runtime, received: input.payload ?? null } };
     }),
   }),
@@ -124,13 +131,14 @@ export const appRouter = router({
         budget: {
           ...budget,
           monthlySpendMicros: monthlyUsage.reduce((sum, invocation) => sum + invocation.costMicros, 0),
+          alertPreview: buildBudgetAlertPreview(ctx.user.id, budget, monthlyUsage.reduce((sum, invocation) => sum + invocation.costMicros, 0)),
         },
         timeline: usageTimeline(invocations),
       };
     }),
   }),
   budget: router({
-    update: protectedProcedure.input(z.object({ monthlyLimitMicros: z.number().int().min(10_000).max(1_000_000_000), alertThresholdPercent: z.number().int().min(1).max(100) })).mutation(({ ctx, input }) => db.updateTenantBudget(ctx.user.id, input)),
+    update: protectedProcedure.input(z.object({ monthlyLimitMicros: z.number().int().min(10_000).max(1_000_000_000), alertThresholdPercent: z.number().int().min(1).max(100), webhookUrl: z.string().max(2048) })).mutation(({ ctx, input }) => db.updateTenantBudget(ctx.user.id, { ...input, webhookUrl: normalizeWebhookUrl(input.webhookUrl) })),
   }),
 });
 

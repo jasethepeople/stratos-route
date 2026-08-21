@@ -21,3 +21,9 @@
 - [x] Add version history, budget, and signed-trigger controls to the aerospace dashboard.
 - [x] Add automated tests for rollback, signature verification, and rate limiting.
 - [x] Verify the upgraded dashboard, run typecheck and tests, update the checklist, and save a delivery checkpoint.
+- [x] Add a tenant-owned per-function requests-per-minute policy with persistence and gateway enforcement.
+- [x] Add configurable tenant budget webhook endpoints and threshold-crossing alert delivery with safe failure handling.
+- [x] Add JavaScript and Python signed-request code generators for authenticated function owners.
+- [x] Add aerospace dashboard controls for function rate policy, alert delivery, and language-specific request snippets.
+- [x] Add tests for custom rate policy enforcement, budget alert triggering, and request-generator output.
+- [x] Verify the completed enhancement, run typecheck and tests, update the checklist, and save a delivery checkpoint.

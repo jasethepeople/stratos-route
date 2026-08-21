@@ -7,6 +7,7 @@ import { registerOAuthRoutes } from "./oauth";
 import { registerStorageProxy } from "./storageProxy";
 import { appRouter } from "../routers";
 import * as db from "../db";
+import { maybeDispatchBudgetAlert } from "../budgetAlerts";
 import { consumeTriggerQuota, verifyTriggerSignature } from "../gatewaySecurity";
 import { calculateExecution, selectOptimalProvider } from "../routing";
 import { publishInvocation, subscribeToInvocations } from "../telemetry";
@@ -72,10 +73,10 @@ async function startServer() {
         return;
       }
 
-      const rateLimit = consumeTriggerQuota(functionRecord.triggerId);
+      const rateLimit = consumeTriggerQuota(functionRecord.triggerId, Date.now(), functionRecord.rateLimitPerMinute);
       if (!rateLimit.allowed) {
         res.setHeader("Retry-After", Math.max(1, Math.ceil((rateLimit.resetAt - Date.now()) / 1000)).toString());
-        res.status(429).json({ error: "Trigger rate limit exceeded", limit: 60, resetAt: rateLimit.resetAt });
+        res.status(429).json({ error: "Trigger rate limit exceeded", limit: functionRecord.rateLimitPerMinute, resetAt: rateLimit.resetAt });
         return;
       }
 
@@ -113,6 +114,7 @@ async function startServer() {
         status: invocation.status,
         billableUnits: invocation.billableUnits,
       });
+      await maybeDispatchBudgetAlert(functionRecord.userId);
 
       res.setHeader("x-stratos-provider", provider.name);
       res.setHeader("x-stratos-duration-ms", execution.durationMs.toString());

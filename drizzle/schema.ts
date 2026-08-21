@@ -34,6 +34,7 @@ export const functions = mysqlTable("functions", {
   triggerId: varchar("triggerId", { length: 32 }).notNull(),
   triggerSecret: varchar("triggerSecret", { length: 96 }).notNull(),
   currentVersion: int("currentVersion").default(1).notNull(),
+  rateLimitPerMinute: int("rateLimitPerMinute").default(60).notNull(),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
 }, table => [
@@ -59,6 +60,9 @@ export const tenantBudgets = mysqlTable("tenant_budgets", {
   userId: int("userId").notNull().references(() => users.id, { onDelete: "cascade" }),
   monthlyLimitMicros: int("monthlyLimitMicros").default(2_000_000).notNull(),
   alertThresholdPercent: int("alertThresholdPercent").default(80).notNull(),
+  webhookUrl: varchar("webhookUrl", { length: 2048 }),
+  lastAlertPeriod: varchar("lastAlertPeriod", { length: 7 }),
+  lastAlertStatus: varchar("lastAlertStatus", { length: 24 }),
   updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
 }, table => [uniqueIndex("tenant_budgets_user_unique").on(table.userId)]);
 

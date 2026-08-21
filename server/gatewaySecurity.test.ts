@@ -21,4 +21,12 @@ describe("gateway trigger security", () => {
     expect(consumeTriggerQuota(triggerId, now).allowed).toBe(false);
     expect(consumeTriggerQuota(triggerId, now + 60_001).allowed).toBe(true);
   });
+
+  it("enforces the configured request-per-minute policy for an individual trigger", () => {
+    const now = 1_725_000_000_000;
+    const triggerId = "custom-rate-policy-isolated";
+    expect(consumeTriggerQuota(triggerId, now, 2).allowed).toBe(true);
+    expect(consumeTriggerQuota(triggerId, now, 2).allowed).toBe(true);
+    expect(consumeTriggerQuota(triggerId, now, 2).allowed).toBe(false);
+  });
 });
